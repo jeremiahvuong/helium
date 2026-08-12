@@ -1,0 +1,244 @@
+--- a/chrome/browser/ui/views/frame/browser_view.cc
++++ b/chrome/browser/ui/views/frame/browser_view.cc
+@@ -979,7 +979,8 @@ BrowserView::BrowserView(Browser* browser)
+           std::make_unique<ExclusiveAccessContextImpl>(*this)),
+       browser_(browser),
+       zen_top_chrome_animation_(this),
+-      zen_side_chrome_animation_(this) {
++      zen_side_chrome_animation_(this),
++      zen_side_attach_animation_(this) {
+   if (auto* manager = InitialWebUIWindowMetricsManager::From(browser_.get())) {
+     manager->OnBrowserWindowCreated();
+   }
+@@ -1008,12 +1009,13 @@ BrowserView::BrowserView(Browser* browser)
+ 
+   SetProperty(views::kElementIdentifierKey, kBrowserViewElementId);
+   // AnimationDelegateViews attaches its compositor-driven animation runner to
+-  // a single container, so both reveal animations must share one to tick at
++  // a single container, so all zen animations must share one to tick at
+   // the display refresh rate.
+   auto zen_animation_container =
+       base::MakeRefCounted<gfx::AnimationContainer>();
+   zen_top_chrome_animation_.SetContainer(zen_animation_container.get());
+   zen_side_chrome_animation_.SetContainer(zen_animation_container.get());
++  zen_side_attach_animation_.SetContainer(zen_animation_container.get());
+   zen_top_chrome_animation_.SetSlideDuration(
+       gfx::Animation::RichAnimationDuration(kZenModeRevealAnimationDuration));
+   zen_top_chrome_animation_.SetTweenType(gfx::Tween::FAST_OUT_SLOW_IN_3);
+@@ -1022,6 +1024,10 @@ BrowserView::BrowserView(Browser* browser)
+       gfx::Animation::RichAnimationDuration(kZenModeRevealAnimationDuration));
+   zen_side_chrome_animation_.SetTweenType(gfx::Tween::FAST_OUT_SLOW_IN_3);
+   zen_side_chrome_animation_.Reset(1);
++  zen_side_attach_animation_.SetSlideDuration(
++      gfx::Animation::RichAnimationDuration(kZenModeRevealAnimationDuration));
++  zen_side_attach_animation_.SetTweenType(gfx::Tween::FAST_OUT_SLOW_IN_3);
++  zen_side_attach_animation_.Reset(1);
+ 
+   browser_->tab_strip_model()->AddObserver(this);
+ 
+@@ -1663,6 +1669,13 @@ float BrowserView::GetSideChromeRevealRatio() const {
+   return zen_side_chrome_animation_.GetCurrentValue();
+ }
+ 
++float BrowserView::GetSideChromeAttachRatio() const {
++  if (!zen_mode_enabled_) {
++    return 1.f;
++  }
++  return zen_side_attach_animation_.GetCurrentValue();
++}
++
+ bool BrowserView::IsZenModeSideChromePinned() const {
+   return zen_mode_enabled_ && browser_->profile()->GetPrefs()->GetBoolean(
+                                   prefs::kHeliumZenModeSidebarPinned);
+@@ -1778,11 +1791,19 @@ void BrowserView::OnZenModeSideChromePinnedPrefChanged() {
+     return;
+   }
+ 
++  // Pinning and unpinning slide the sidebar while the contents edge follows
++  // the attach ratio, instead of snapping between the attached and floating
++  // layouts.
+   if (IsZenModeSideChromePinned()) {
+-    zen_side_chrome_animation_.Reset(1);
++    zen_side_attach_animation_.Show();
++    zen_side_chrome_animation_.Show();
+   } else {
+     MaybeExpandVerticalTabStripForZenMode();
+-    UpdateZenModeRevealFromCursor();
++    // Collapse directly rather than via the cursor-driven reveal, so the
++    // sidebar doesn't linger fully revealed in the floating style before
++    // hiding.
++    zen_side_attach_animation_.Hide();
++    zen_side_chrome_animation_.Hide();
+   }
+ 
+   if (vertical_tab_strip_region_view_) {
+@@ -1859,6 +1880,13 @@ void BrowserView::UpdateZenModeState() {
+       zen_side_chrome_animation_.Reset(1);
+     }
+ 
++    // The sidebar is attached before zen mode is entered; when unpinned it
++    // detaches by sliding out, with the contents edge following it.
++    zen_side_attach_animation_.Reset(1);
++    if (!IsZenModeSideChromePinned()) {
++      zen_side_attach_animation_.Hide();
++    }
++
+     if (IsZenModeTopChromePinned()) {
+       zen_top_chrome_animation_.Reset(1);
+     }
+@@ -6688,7 +6716,8 @@ void BrowserView::OnEvent(const ui::Event& event) {
+ 
+ void BrowserView::AnimationProgressed(const gfx::Animation* animation) {
+   if (animation == &zen_top_chrome_animation_ ||
+-      animation == &zen_side_chrome_animation_) {
++      animation == &zen_side_chrome_animation_ ||
++      animation == &zen_side_attach_animation_) {
+     const bool top_chrome_animation = animation == &zen_top_chrome_animation_;
+     if (top_chrome_animation && vertical_tab_strip_region_view_) {
+       vertical_tab_strip_region_view_->UpdateInteriorMargin();
+--- a/chrome/browser/ui/views/frame/browser_view.h
++++ b/chrome/browser/ui/views/frame/browser_view.h
+@@ -433,6 +433,7 @@ class BrowserView : public BrowserWindow,
+   bool IsZenModeEnabledForLayout() const;
+   float GetTopChromeRevealRatio() const;
+   float GetSideChromeRevealRatio() const;
++  float GetSideChromeAttachRatio() const;
+   bool IsZenModeSideChromePinned() const;
+   bool IsZenModeTopChromePinned() const;
+ 
+@@ -1478,6 +1479,7 @@ class BrowserView : public BrowserWindow,
+   std::unique_ptr<views::EventMonitor> zen_mode_event_monitor_;
+   gfx::SlideAnimation zen_top_chrome_animation_;
+   gfx::SlideAnimation zen_side_chrome_animation_;
++  gfx::SlideAnimation zen_side_attach_animation_;
+   base::OneShotTimer zen_cursor_exit_timer_;
+   std::optional<gfx::Point> zen_last_cursor_;
+   bool zen_mode_enabled_ = false;
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate.h
+@@ -55,6 +55,7 @@ class BrowserViewLayoutDelegate {
+   virtual bool IsZenModeEnabledForLayout() const { return false; }
+   virtual float GetTopChromeRevealRatio() const { return 1.f; }
+   virtual float GetSideChromeRevealRatio() const { return 1.f; }
++  virtual float GetSideChromeAttachRatio() const { return 1.f; }
+   virtual bool IsZenModeSideChromePinned() const { return false; }
+   virtual bool IsZenModeTopChromePinned() const { return false; }
+   virtual gfx::NativeView GetHostViewForAnchoring() const = 0;
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.cc
+@@ -209,6 +209,10 @@ float BrowserViewLayoutDelegateImpl::GetSideChromeRevealRatio() const {
+   return browser_view_->GetSideChromeRevealRatio();
+ }
+ 
++float BrowserViewLayoutDelegateImpl::GetSideChromeAttachRatio() const {
++  return browser_view_->GetSideChromeAttachRatio();
++}
++
+ bool BrowserViewLayoutDelegateImpl::IsZenModeTopChromePinned() const {
+   return browser_view_->IsZenModeTopChromePinned();
+ }
+--- a/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.h
++++ b/chrome/browser/ui/views/frame/layout/browser_view_layout_delegate_impl.h
+@@ -46,6 +46,7 @@ class BrowserViewLayoutDelegateImpl : public BrowserViewLayoutDelegate {
+   bool IsZenModeEnabledForLayout() const override;
+   float GetTopChromeRevealRatio() const override;
+   float GetSideChromeRevealRatio() const override;
++  float GetSideChromeAttachRatio() const override;
+   bool IsZenModeSideChromePinned() const override;
+   bool IsZenModeTopChromePinned() const override;
+   gfx::NativeView GetHostViewForAnchoring() const override;
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -71,6 +71,7 @@ struct ZenModeLayoutState {
+   bool floating_vertical_tab_strip = false;
+   float top_chrome_ratio = 1.0f;
+   float side_chrome_ratio = 1.0f;
++  float side_chrome_attach_ratio = 1.0f;
+   int vertical_tab_strip_padding = 0;
+   int vertical_tab_strip_top_padding = 0;
+ 
+@@ -79,6 +80,13 @@ struct ZenModeLayoutState {
+   bool ShouldLayoutVerticalTabStrip() const {
+     return !floating_vertical_tab_strip || side_chrome_ratio > 0.0f;
+   }
++
++  // The floating visual treatment (rounded outline, clipping) only applies
++  // once the sidebar has fully detached; mid-transition it keeps the attached
++  // style so pinning and unpinning read as one continuous slide.
++  bool FloatingVerticalTabStripStyle() const {
++    return floating_vertical_tab_strip && side_chrome_attach_ratio <= 0.0f;
++  }
+ };
+ 
+ int ScaleExtent(int extent, float ratio) {
+@@ -121,28 +129,38 @@ ZenModeLayoutState GetZenModeLayoutState(
+     bool vertical_tab_strip_active) {
+   ZenModeLayoutState state;
+   state.enabled = delegate.IsZenModeEnabledForLayout();
+-  state.floating_vertical_tab_strip = state.enabled &&
+-                                      vertical_tab_strip_active &&
+-                                      !delegate.IsZenModeSideChromePinned();
+   state.top_chrome_ratio = delegate.GetTopChromeRevealRatio();
+   state.side_chrome_ratio = delegate.GetSideChromeRevealRatio();
++  state.side_chrome_attach_ratio = delegate.GetSideChromeAttachRatio();
++  // Lay out the sidebar as floating whenever it isn't fully attached, so
++  // pinning and unpinning animate through the floating layout instead of
++  // snapping between the attached and floating states.
++  state.floating_vertical_tab_strip = state.enabled &&
++                                      vertical_tab_strip_active &&
++                                      state.side_chrome_attach_ratio < 1.0f;
+ 
+   if (!state.floating_vertical_tab_strip) {
+     return state;
+   }
+ 
+-  state.vertical_tab_strip_padding = kZenModeVTSPadding;
++  // The floating paddings grow in as the sidebar detaches, so the attached
++  // geometry (no padding) morphs into the floating one.
++  const float detach_ratio = 1.0f - state.side_chrome_attach_ratio;
++  state.vertical_tab_strip_padding =
++      ScaleExtent(kZenModeVTSPadding, detach_ratio);
+   const int revealed_top_padding =
+       std::max(0, GetGenericFrameRadius() -
+                       GetLayoutConstant(LayoutConstant::kHeliumBasePadding));
++  int vertical_tab_strip_top_padding;
+   if (delegate.IsZenModeTopChromePinned()) {
+-    state.vertical_tab_strip_top_padding = revealed_top_padding;
++    vertical_tab_strip_top_padding = revealed_top_padding;
+   } else {
+-    state.vertical_tab_strip_top_padding =
+-        ScaleExtent(state.vertical_tab_strip_padding,
+-                    1.0f - state.top_chrome_ratio) +
++    vertical_tab_strip_top_padding =
++        ScaleExtent(kZenModeVTSPadding, 1.0f - state.top_chrome_ratio) +
+         ScaleExtent(revealed_top_padding, state.top_chrome_ratio);
+   }
++  state.vertical_tab_strip_top_padding =
++      ScaleExtent(vertical_tab_strip_top_padding, detach_ratio);
+   return state;
+ }
+ 
+@@ -915,6 +933,14 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+         }
+         params.InsetHorizontal(inset_amount,
+                                /*leading=*/!vertical_right_aligned);
++      } else if (zen.side_chrome_attach_ratio > 0.0f) {
++        // Mid pin/unpin transition: the contents edge follows the detaching
++        // sidebar instead of snapping to the full window width.
++        params.InsetHorizontal(
++            ScaleExtent(
++                vertical_tab_strip_width + zen.vertical_tab_strip_padding,
++                zen.side_chrome_attach_ratio),
++            /*leading=*/!vertical_right_aligned);
+       }
+ 
+       // Let the vertical tab strip animate out over the content.
+@@ -1429,7 +1455,7 @@ BrowserViewTabbedLayoutImpl::CalculateProposedLayout(
+     views().vertical_tab_strip_region_view->SetHasLeadingExclusionForLayout(
+         has_leading_exclusion);
+     views().vertical_tab_strip_region_view->SetZenModeFloatingStyleForLayout(
+-        zen.floating_vertical_tab_strip);
++        zen.FloatingVerticalTabStripStyle());
+   }
+ 
+   return layout;
