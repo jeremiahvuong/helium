@@ -1,0 +1,25 @@
+--- a/chrome/browser/ui/views/tabs/common/tab_view.cc
++++ b/chrome/browser/ui/views/tabs/common/tab_view.cc
+@@ -769,10 +769,9 @@ bool TabView::IsChildVisible(const views::View* child_view,
+       return false;
+     }
+ 
+-    // When uncollapsing the tabstrip, intentionally start showing the close
+-    // button on active non-hovered tabs a little bit sooner than reaching the
+-    // uncollapsed min width, because otherwise the close buttons in a grouped
+-    // split tab will visibly show up at different times due to rounding.
++    // The close button only appears while the tab is hovered or focused,
++    // never just because the tab is active. Below the uncollapsed min width
++    // only the active tab has room to show it.
+     constexpr int kUncollapsedMinWidthThreshold = 3;
+ 
+     if (width < UncollapsedMinWidth() - kUncollapsedMinWidthThreshold) {
+@@ -780,7 +779,7 @@ bool TabView::IsChildVisible(const views::View* child_view,
+                          (close_button_ && close_button_->HasFocus()));
+     }
+ 
+-    return active_ || hovered_ || HasFocus() ||
++    return hovered_ || HasFocus() ||
+            (close_button_ && close_button_->HasFocus());
+   }
+ 
