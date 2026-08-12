@@ -1,0 +1,398 @@
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.cc
+@@ -50,6 +50,7 @@
+ #include "chrome/browser/ui/views/tabs/common/tab_view.h"
+ #include "chrome/browser/ui/views/tabs/common/unpinned_tab_container_view.h"
+ #include "chrome/browser/ui/views/tabs/shared/drop_arrow.h"
++#include "chrome/browser/ui/views/tabs/vertical/vertical_tab_shortcut_hint_overlay.h"
+ #include "chrome/browser/ui/views/tabs/vertical/vertical_tab_strip_bottom_container.h"
+ #include "chrome/browser/ui/web_applications/app_browser_controller.h"
+ #include "chrome/grit/generated_resources.h"
+@@ -173,6 +174,11 @@ VerticalTabStripRegionView::VerticalTabStripRegionView(
+       kExpandOnHoverShadowElevation, kExpandOnHoverShadowAlpha));
+   shadow_frame_->SetProperty(views::kViewIgnoredByLayoutKey, true);
+ 
++  shortcut_hint_overlay_ =
++      AddChildView(std::make_unique<VerticalTabShortcutHintOverlay>(
++          this, tab_strip_model_));
++  shortcut_hint_overlay_->SetProperty(views::kViewIgnoredByLayoutKey, true);
++
+   SetNotifyEnterExitOnChild(true);
+   UpdateColors();
+   UpdateInteriorMargin();
+@@ -379,6 +385,7 @@ void VerticalTabStripRegionView::Layout(PassKey) {
+   resize_area_->SetBoundsRect(
+       gfx::Rect(resize_area_x, 0, resize_area_width_, bounds().height()));
+   shadow_frame_->SetBoundsRect(GetLocalBounds());
++  shortcut_hint_overlay_->SetBoundsRect(GetLocalBounds());
+ 
+   // Ensure that we update the drop arrow position so that it does not render in
+   // the collapsed state when expand on hover is active.
+@@ -763,6 +770,8 @@ views::View* VerticalTabStripRegionView::SetTabStripView(
+   CHECK(bottom_container_index.has_value());
+   ReorderChildView(tab_strip_view_, bottom_container_index.value());
+ 
++  shortcut_hint_overlay_->SetTabStripView(tab_strip_view_);
++
+   OnCollapseStateChanged(state_controller_->GetCollapseState());
+ 
+   return tab_strip_view_;
+@@ -777,6 +786,8 @@ void VerticalTabStripRegionView::ClearTabStripView(views::View* view) {
+   ResetExpandOnHoverTimers();
+   is_expanded_on_hover_ = false;
+ 
++  shortcut_hint_overlay_->SetTabStripView(nullptr);
++
+   CHECK(tab_strip_view_);
+   CHECK(tab_strip_view_ == view);
+   RemoveChildViewT(std::exchange(tab_strip_view_, nullptr));
+--- a/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
++++ b/chrome/browser/ui/views/frame/vertical_tab_strip_region_view.h
+@@ -34,6 +34,7 @@
+ 
+ class BrowserView;
+ class VerticalTabStripBottomContainer;
++class VerticalTabShortcutHintOverlay;
+ class ShadowFrameView;
+ 
+ namespace tabs {
+@@ -235,6 +236,7 @@ class VerticalTabStripRegionView final
+   bool zen_mode_floating_style_ = false;
+ 
+   raw_ptr<VerticalTabStripBottomContainer> bottom_button_container_ = nullptr;
++  raw_ptr<VerticalTabShortcutHintOverlay> shortcut_hint_overlay_ = nullptr;
+   raw_ptr<views::View> gemini_button_ = nullptr;
+   raw_ptr<views::ResizeArea> resize_area_ = nullptr;
+   raw_ptr<ShadowFrameView> shadow_frame_ = nullptr;
+--- a/chrome/browser/ui/views/tabs/vertical/BUILD.gn
++++ b/chrome/browser/ui/views/tabs/vertical/BUILD.gn
+@@ -9,6 +9,7 @@ source_set("vertical") {
+   sources = [
+     "top_container_button.h",
+     "vertical_new_tab_button.h",
++    "vertical_tab_shortcut_hint_overlay.h",
+     "vertical_tab_strip_bottom_container.h",
+     "vertical_tab_strip_expand_on_hover_lock.h",
+     "vertical_tab_strip_scroll_bar.h",
+@@ -38,6 +39,7 @@ source_set("impl") {
+   sources = [
+     "top_container_button.cc",
+     "vertical_new_tab_button.cc",
++    "vertical_tab_shortcut_hint_overlay.cc",
+     "vertical_tab_strip_bottom_container.cc",
+     "vertical_tab_strip_expand_on_hover_lock.cc",
+     "vertical_tab_strip_scroll_bar.cc",
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_shortcut_hint_overlay.cc
+@@ -0,0 +1,232 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#include "chrome/browser/ui/views/tabs/vertical/vertical_tab_shortcut_hint_overlay.h"
++
++#include <optional>
++#include <string>
++
++#include "base/functional/bind.h"
++#include "base/strings/string_number_conversions.h"
++#include "build/build_config.h"
++#include "cc/paint/paint_flags.h"
++#include "chrome/browser/ui/tabs/tab_strip_model.h"
++#include "chrome/browser/ui/views/frame/base_tab_strip_region_view.h"
++#include "chrome/browser/ui/views/tabs/common/tab_strip_view.h"
++#include "third_party/skia/include/core/SkColor.h"
++#include "ui/base/metadata/metadata_impl_macros.h"
++#include "ui/color/color_id.h"
++#include "ui/color/color_provider.h"
++#include "ui/compositor/layer.h"
++#include "ui/events/event.h"
++#include "ui/events/event_constants.h"
++#include "ui/gfx/canvas.h"
++#include "ui/gfx/font.h"
++#include "ui/gfx/font_list.h"
++#include "ui/gfx/geometry/rect_conversions.h"
++#include "ui/gfx/geometry/rect_f.h"
++#include "ui/views/controls/scroll_view.h"
++#include "ui/views/event_monitor.h"
++#include "ui/views/widget/widget.h"
++
++namespace {
++
++// The modifier that triggers the hints, matching the platform's tab switching
++// accelerators (Cmd+1..9 on macOS, Ctrl+1..9 elsewhere).
++#if BUILDFLAG(IS_MAC)
++constexpr int kHintModifierFlag = ui::EF_COMMAND_DOWN;
++#else
++constexpr int kHintModifierFlag = ui::EF_CONTROL_DOWN;
++#endif
++
++constexpr int kChipHeight = 16;
++constexpr int kChipHorizontalPadding = 5;
++constexpr int kChipTrailingInset = 6;
++// Rounded close to, but not quite, a full pill.
++constexpr float kChipCornerRadius = kChipHeight / 2.0f - 2.0f;
++constexpr SkAlpha kChipOutlineAlpha = 0x2E;
++
++std::u16string GetHintText(int number) {
++#if BUILDFLAG(IS_MAC)
++  // U+2318 PLACE OF INTEREST SIGN (the Command key symbol).
++  return u"⌘" + base::NumberToString16(number);
++#else
++  return u"Ctrl+" + base::NumberToString16(number);
++#endif
++}
++
++}  // namespace
++
++VerticalTabShortcutHintOverlay::VerticalTabShortcutHintOverlay(
++    BaseTabStripRegionView* region_view,
++    TabStripModel* tab_strip_model)
++    : region_view_(region_view), tab_strip_model_(tab_strip_model) {
++  // The overlay is purely decorative and must never intercept events meant
++  // for the tabs underneath.
++  SetCanProcessEventsWithinSubtree(false);
++  // Paint to a layer so the hints render above the scrolling tab containers.
++  SetPaintToLayer();
++  layer()->SetFillsBoundsOpaquely(false);
++}
++
++VerticalTabShortcutHintOverlay::~VerticalTabShortcutHintOverlay() = default;
++
++void VerticalTabShortcutHintOverlay::SetTabStripView(
++    TabStripView* tab_strip_view) {
++  pinned_scrolled_subscription_ = {};
++  unpinned_scrolled_subscription_ = {};
++  if (!tab_strip_view) {
++    return;
++  }
++
++  // Repaint on scroll, since the overlay's layer is not damaged when the tab
++  // containers scroll underneath it.
++  auto repaint_if_shown = base::BindRepeating(
++      [](VerticalTabShortcutHintOverlay* overlay) {
++        if (overlay->hints_shown_) {
++          overlay->SchedulePaint();
++        }
++      },
++      base::Unretained(this));
++  pinned_scrolled_subscription_ =
++      tab_strip_view->pinned_tabs_scroll_view()->AddContentsScrolledCallback(
++          repaint_if_shown);
++  unpinned_scrolled_subscription_ =
++      tab_strip_view->unpinned_tabs_scroll_view()->AddContentsScrolledCallback(
++          repaint_if_shown);
++}
++
++void VerticalTabShortcutHintOverlay::OnPaint(gfx::Canvas* canvas) {
++  if (!hints_shown_) {
++    return;
++  }
++
++  const int tab_count = tab_strip_model_->count();
++  for (int i = 0; i < tab_count; ++i) {
++    // The first eight tabs get 1-8; 9 selects the last tab.
++    std::optional<int> number;
++    if (i < 8) {
++      number = i + 1;
++    }
++    if (i == tab_count - 1 && tab_count >= 9) {
++      number = 9;
++    }
++    if (!number.has_value()) {
++      continue;
++    }
++
++    views::View* const tab = region_view_->GetTabAnchorViewAt(i);
++    if (!tab || !tab->IsDrawn()) {
++      continue;
++    }
++
++    // Skip tabs that are (mostly) scrolled out of the viewport.
++    const gfx::Rect visible_bounds = tab->GetVisibleBounds();
++    if (visible_bounds.IsEmpty() ||
++        visible_bounds.height() < tab->height() / 2) {
++      continue;
++    }
++
++    gfx::RectF tab_bounds(tab->GetLocalBounds());
++    views::View::ConvertRectToTarget(tab, this, &tab_bounds);
++    PaintHint(canvas, gfx::ToEnclosingRect(tab_bounds), number.value());
++  }
++}
++
++void VerticalTabShortcutHintOverlay::AddedToWidget() {
++  views::Widget* const widget = GetWidget();
++  widget_observation_.Reset();
++  widget_observation_.Observe(widget);
++  event_monitor_ = views::EventMonitor::CreateWindowMonitor(
++      this, widget->GetNativeWindow(),
++      {ui::EventType::kKeyPressed, ui::EventType::kKeyReleased,
++       ui::EventType::kMouseReleased});
++}
++
++void VerticalTabShortcutHintOverlay::RemovedFromWidget() {
++  event_monitor_.reset();
++  widget_observation_.Reset();
++  SetHintsShown(false);
++}
++
++void VerticalTabShortcutHintOverlay::OnEvent(const ui::Event& event) {
++  const bool modifier_down = (event.flags() & kHintModifierFlag) != 0;
++  if (modifier_down && hints_shown_) {
++    // Tabs may have been added, closed or reordered while the modifier was
++    // held down; repaint with fresh positions.
++    SchedulePaint();
++  }
++  SetHintsShown(modifier_down);
++}
++
++void VerticalTabShortcutHintOverlay::OnWidgetActivationChanged(
++    views::Widget* widget,
++    bool active) {
++  // The modifier release is not observed when the window is deactivated while
++  // it is held down (e.g. Cmd+Tab), so hide the hints here.
++  if (!active) {
++    SetHintsShown(false);
++  }
++}
++
++void VerticalTabShortcutHintOverlay::SetHintsShown(bool shown) {
++  if (hints_shown_ == shown) {
++    return;
++  }
++  hints_shown_ = shown;
++  SchedulePaint();
++}
++
++void VerticalTabShortcutHintOverlay::PaintHint(gfx::Canvas* canvas,
++                                               const gfx::Rect& tab_bounds,
++                                               int number) {
++  const ui::ColorProvider* const color_provider = GetColorProvider();
++  if (!color_provider) {
++    return;
++  }
++
++  const std::u16string text = GetHintText(number);
++  const gfx::FontList font =
++      gfx::FontList().Derive(-1, gfx::Font::NORMAL, gfx::Font::Weight::MEDIUM);
++  const int chip_width =
++      gfx::Canvas::GetStringWidth(text, font) + 2 * kChipHorizontalPadding;
++
++  gfx::Rect chip_rect(tab_bounds.right() - kChipTrailingInset - chip_width,
++                      tab_bounds.CenterPoint().y() - kChipHeight / 2,
++                      chip_width, kChipHeight);
++  // Collapsed tabs can be narrower than the chip; center it instead.
++  if (chip_rect.x() < tab_bounds.x()) {
++    chip_rect.set_x(tab_bounds.x() + (tab_bounds.width() - chip_width) / 2);
++  }
++
++  // Tooltip colors keep the chip legible on top of both the light and dark
++  // theme tab strip.
++  const SkColor background =
++      color_provider->GetColor(ui::kColorTooltipBackground);
++  const SkColor foreground =
++      color_provider->GetColor(ui::kColorTooltipForeground);
++
++  cc::PaintFlags fill_flags;
++  fill_flags.setAntiAlias(true);
++  fill_flags.setStyle(cc::PaintFlags::kFill_Style);
++  fill_flags.setColor(background);
++  canvas->DrawRoundRect(gfx::RectF(chip_rect), kChipCornerRadius, fill_flags);
++
++  // Hairline outline for definition when the chip is close in color to what
++  // is underneath it.
++  cc::PaintFlags outline_flags;
++  outline_flags.setAntiAlias(true);
++  outline_flags.setStyle(cc::PaintFlags::kStroke_Style);
++  outline_flags.setStrokeWidth(1.0f);
++  outline_flags.setColor(SkColorSetA(foreground, kChipOutlineAlpha));
++  gfx::RectF outline_rect(chip_rect);
++  outline_rect.Inset(0.5f);
++  canvas->DrawRoundRect(outline_rect, kChipCornerRadius, outline_flags);
++
++  canvas->DrawStringRectWithFlags(text, font, foreground, chip_rect,
++                                  gfx::Canvas::TEXT_ALIGN_CENTER);
++}
++
++BEGIN_METADATA(VerticalTabShortcutHintOverlay)
++END_METADATA
+--- /dev/null
++++ b/chrome/browser/ui/views/tabs/vertical/vertical_tab_shortcut_hint_overlay.h
+@@ -0,0 +1,76 @@
++// Copyright 2026 The Helium Authors
++// You can use, redistribute, and/or modify this source code under
++// the terms of the GPL-3.0 license that can be found in the LICENSE file.
++
++#ifndef CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_SHORTCUT_HINT_OVERLAY_H_
++#define CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_SHORTCUT_HINT_OVERLAY_H_
++
++#include <memory>
++
++#include "base/callback_list.h"
++#include "base/memory/raw_ptr.h"
++#include "base/scoped_observation.h"
++#include "ui/base/metadata/metadata_header_macros.h"
++#include "ui/events/event_observer.h"
++#include "ui/views/view.h"
++#include "ui/views/widget/widget_observer.h"
++
++class BaseTabStripRegionView;
++class TabStripModel;
++class TabStripView;
++
++namespace views {
++class EventMonitor;
++}  // namespace views
++
++// A paint-only overlay that shows tab switching shortcut hints ("⌘1".."⌘9")
++// next to each tab in the vertical tab strip while the tab switching modifier
++// (Command on macOS, Control elsewhere) is held down. The first eight tabs are
++// numbered 1-8, and the last tab shows 9 to match the "select last tab"
++// accelerator.
++class VerticalTabShortcutHintOverlay : public views::View,
++                                       public ui::EventObserver,
++                                       public views::WidgetObserver {
++  METADATA_HEADER(VerticalTabShortcutHintOverlay, views::View)
++ public:
++  VerticalTabShortcutHintOverlay(BaseTabStripRegionView* region_view,
++                                 TabStripModel* tab_strip_model);
++  VerticalTabShortcutHintOverlay(const VerticalTabShortcutHintOverlay&) =
++      delete;
++  VerticalTabShortcutHintOverlay& operator=(
++      const VerticalTabShortcutHintOverlay&) = delete;
++  ~VerticalTabShortcutHintOverlay() override;
++
++  // Called by the region view when the tab strip view is created or destroyed
++  // so the overlay can repaint when the tab containers scroll. `tab_strip_view`
++  // may be null.
++  void SetTabStripView(TabStripView* tab_strip_view);
++
++  // views::View:
++  void OnPaint(gfx::Canvas* canvas) override;
++  void AddedToWidget() override;
++  void RemovedFromWidget() override;
++
++  // ui::EventObserver:
++  void OnEvent(const ui::Event& event) override;
++
++  // views::WidgetObserver:
++  void OnWidgetActivationChanged(views::Widget* widget, bool active) override;
++
++ private:
++  void SetHintsShown(bool shown);
++  void PaintHint(gfx::Canvas* canvas, const gfx::Rect& tab_bounds, int number);
++
++  const raw_ptr<BaseTabStripRegionView> region_view_;
++  const raw_ptr<TabStripModel> tab_strip_model_;
++
++  bool hints_shown_ = false;
++
++  std::unique_ptr<views::EventMonitor> event_monitor_;
++  base::CallbackListSubscription pinned_scrolled_subscription_;
++  base::CallbackListSubscription unpinned_scrolled_subscription_;
++  base::ScopedObservation<views::Widget, views::WidgetObserver>
++      widget_observation_{this};
++};
++
++#endif  // CHROME_BROWSER_UI_VIEWS_TABS_VERTICAL_VERTICAL_TAB_SHORTCUT_HINT_OVERLAY_H_
