@@ -18,6 +18,10 @@ This repo lives in a build workspace at `~/workspace/ws-helium/`:
   setup. For fast iteration, edit files there directly and re-run
   `./build-and-run.sh build` (incremental ninja), then fold changes back into
   a patch with quilt (see helium-macos docs) — do not re-run setup.
+- **Never start a build yourself.** Builds (`./build-and-run.sh`, `he build`,
+  ninja, etc.) are run by the user only — they are long and hog the machine.
+  Verify patch work with the scratch-tree method and `check_patch_files.py`,
+  then report that the tree is ready and let the user build.
 
 ## What this repo is
 
@@ -110,6 +114,13 @@ heavily patched:
 - The scroll views use layered scrolling: overlay views painted above them
   don't get damaged when contents scroll — subscribe via
   `views::ScrollView::AddContentsScrolledCallback` to repaint.
+- `gfx::SlideAnimation`/`LinearAnimation` with a raw `gfx::AnimationDelegate`
+  tick on a `base::Timer` capped at 60 fps. For UI animations, inherit
+  `views::AnimationDelegateViews` instead — it attaches a
+  `CompositorAnimationRunner` so animations tick with vsync at the display's
+  refresh rate. It tracks only one `gfx::AnimationContainer`, so multiple
+  animations on one delegate must share a container via `SetContainer()`
+  (see `BrowserView` zen reveal animations in zen-mode.patch).
 
 Worked example of all of the above:
 `patches/helium/ui/layout/vertical-tab-shortcut-hints.patch` (Cmd-held ⌘n
