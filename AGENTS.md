@@ -18,6 +18,12 @@ This repo lives in a build workspace at `~/workspace/ws-helium/`:
   setup. For fast iteration, edit files there directly and re-run
   `./build-and-run.sh build` (incremental ninja), then fold changes back into
   a patch with quilt (see helium-macos docs) — do not re-run setup.
+- **Patches in this repo do NOT reach the build tree on their own.** The
+  series is applied once, during setup; incremental builds compile
+  `build/src/` as-is (ninja reports "nothing to do" if it wasn't touched).
+  After authoring or changing a patch here, also apply it to the build tree:
+  `cd ../helium-macos/build/src && patch -p1 < ../../../helium/patches/<patch>`
+  (dry-run first), then let the user run the incremental build.
 - **Never start a build yourself.** Builds (`./build-and-run.sh`, `he build`,
   ninja, etc.) are run by the user only — they are long and hog the machine.
   Verify patch work with the scratch-tree method and `check_patch_files.py`,
