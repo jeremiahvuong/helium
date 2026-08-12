@@ -24,27 +24,35 @@
  }
  
  BrowserView::~BrowserView() {
-@@ -6715,6 +6725,10 @@ void BrowserView::OnEvent(const ui::Event& event) {
+@@ -6715,6 +6725,11 @@ void BrowserView::OnEvent(const ui::Event& event) {
  }
  
  void BrowserView::AnimationProgressed(const gfx::Animation* animation) {
-+  if (animation == &zen_side_attach_animation_ &&
-+      zen_side_attach_animation_.is_animating()) {
-+    SetSidebarAnimationFastResize(true);
++  if ((animation == &zen_side_attach_animation_ ||
++       animation == &zen_top_chrome_animation_) &&
++      animation->is_animating()) {
++    SetChromeAnimationFastResize(true);
 +  }
    if (animation == &zen_top_chrome_animation_ ||
        animation == &zen_side_chrome_animation_ ||
        animation == &zen_side_attach_animation_) {
-@@ -6739,6 +6753,63 @@ void BrowserView::AnimationProgressed(const gfx::Animation* animation) {
+@@ -6739,6 +6754,71 @@ void BrowserView::AnimationProgressed(const gfx::Animation* animation) {
  
  void BrowserView::AnimationEnded(const gfx::Animation* animation) {
    AnimationProgressed(animation);
-+  if (animation == &zen_side_attach_animation_) {
++  if (animation == &zen_side_attach_animation_ ||
++      animation == &zen_top_chrome_animation_) {
 +    // Apply the final animation frame's layout while fast resize is still on,
 +    // then release it so the contents get their single post-animation resize.
 +    DeprecatedLayoutImmediately();
-+    SetSidebarAnimationFastResize(IsVerticalTabStripWidthAnimating());
++    SetChromeAnimationFastResize(IsContentsResizeAnimating());
 +  }
++}
++
++bool BrowserView::IsContentsResizeAnimating() const {
++  return IsVerticalTabStripWidthAnimating() ||
++         zen_side_attach_animation_.is_animating() ||
++         zen_top_chrome_animation_.is_animating();
 +}
 +
 +bool BrowserView::IsVerticalTabStripWidthAnimating() const {
@@ -72,15 +80,16 @@
 +    width_animating = motion == TabStripAnimations::kExpand ||
 +                      motion == TabStripAnimations::kCollapse;
 +  }
-+  SetSidebarAnimationFastResize(width_animating ||
-+                                zen_side_attach_animation_.is_animating());
++  SetChromeAnimationFastResize(width_animating ||
++                               zen_side_attach_animation_.is_animating() ||
++                               zen_top_chrome_animation_.is_animating());
 +}
 +
-+void BrowserView::SetSidebarAnimationFastResize(bool fast_resize) {
-+  if (sidebar_animation_fast_resize_ == fast_resize) {
++void BrowserView::SetChromeAnimationFastResize(bool fast_resize) {
++  if (chrome_animation_fast_resize_ == fast_resize) {
 +    return;
 +  }
-+  sidebar_animation_fast_resize_ = fast_resize;
++  chrome_animation_fast_resize_ = fast_resize;
 +  // Tab dragging manages the fast resize bit itself and re-lays out the
 +  // contents when the drag ends.
 +  if (browser_widget()->tab_drag_kind() != TabDragKind::kNone) {
@@ -109,7 +118,7 @@
  #include "chrome/browser/ui/bookmarks/bookmark_bar_controller.h"
  #include "chrome/browser/ui/browser.h"
  #include "chrome/browser/ui/browser_shortcuts/browser_shortcut_service.h"
-@@ -799,6 +800,20 @@ class BrowserView : public BrowserWindow,
+@@ -799,6 +800,26 @@ class BrowserView : public BrowserWindow,
    void AnimationProgressed(const gfx::Animation* animation) override;
    void AnimationEnded(const gfx::Animation* animation) override;
  
@@ -117,27 +126,34 @@
 +  // changing the tab strip width (and with it the contents bounds).
 +  bool IsVerticalTabStripWidthAnimating() const;
 +
++  // Whether any browser chrome animation is currently changing the contents
++  // bounds: the vertical tab strip width animation, the zen sidebar attach
++  // transition, or the zen top chrome reveal.
++  bool IsContentsResizeAnimating() const;
++
 +  // Called for updates to the vertical tab strip animation group.
 +  void OnVerticalTabStripAnimationUpdate(
 +      const BrowserAnimationController* controller,
 +      BrowserAnimationUpdate update);
 +
-+  // Turns fast resize for the contents web views on while an animation is
-+  // changing the sidebar width, and back off (with a relayout) once it ends,
-+  // so the renderer sees a single resize instead of one per animation frame.
-+  void SetSidebarAnimationFastResize(bool fast_resize);
++  // Turns fast resize for the contents web views on while a browser chrome
++  // animation is changing the contents bounds, and back off (with a relayout)
++  // once it ends, so the renderer sees a single resize instead of one per
++  // animation frame.
++  void SetChromeAnimationFastResize(bool fast_resize);
 +
    // AppMenuButtonObserver:
    void AppMenuShown() override;
    void AppMenuClosed() override;
-@@ -1484,6 +1499,11 @@ class BrowserView : public BrowserWindow,
+@@ -1484,6 +1505,12 @@ class BrowserView : public BrowserWindow,
    std::optional<gfx::Point> zen_last_cursor_;
    bool zen_mode_enabled_ = false;
  
-+  // Fast-resize handling while the sidebar width animates (vertical tab strip
-+  // collapse/expand and zen sidebar pin/unpin).
++  // Fast-resize handling while browser chrome animations resize the contents
++  // (vertical tab strip collapse/expand, zen sidebar pin/unpin, and the zen
++  // top chrome reveal).
 +  base::CallbackListSubscription vertical_tab_strip_animation_subscription_;
-+  bool sidebar_animation_fast_resize_ = false;
++  bool chrome_animation_fast_resize_ = false;
 +
    mutable base::WeakPtrFactory<BrowserView> weak_ptr_factory_{this};
  };
