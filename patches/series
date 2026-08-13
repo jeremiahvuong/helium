@@ -331,6 +331,7 @@ helium/ui/layout/zen-caption-buttons.patch
 helium/ui/layout/zen-mode.patch
 helium/ui/layout/zen-sidebar-attach-transition.patch
 helium/ui/layout/sidebar-fast-resize.patch
+helium/ui/layout/mac-native-view-host-fast-resize.patch
 helium/ui/layout/vertical-tab-shortcut-hints.patch
 helium/ui/layout/vertical-tab-hover-close-button.patch
 

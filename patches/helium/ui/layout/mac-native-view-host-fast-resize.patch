@@ -1,0 +1,42 @@
+--- a/ui/views/controls/native/native_view_host_mac.mm
++++ b/ui/views/controls/native/native_view_host_mac.mm
+@@ -256,14 +256,35 @@
+                                    int h,
+                                    int native_w,
+                                    int native_h) {
+-  // TODO(crbug.com/41132564): Implement host_->fast_resize().
+-
+   int superview_height =
+       host_->GetWidget()->GetClientAreaBoundsInScreen().height();
+ 
+   if (native_view_hostable_) {
+-    native_view_hostable_->ViewsHostableSetBounds(gfx::Rect(x, y, w, h),
+-                                                  superview_height);
++    gfx::Rect bounds(x, y, w, h);
++    // Fast resize (upstream TODO(crbug.com/41132564)): keep the hosted NSView
++    // (and with it the renderer) at its current size while the host view's
++    // bounds animate, so the web contents get a single real resize when fast
++    // resize is released instead of a relayout per animation frame. The
++    // hosted layers are clipped to the host bounds and anchored bottom-right,
++    // which keeps page content stationary while browser chrome above or to
++    // the left of it animates.
++    bool fast_resize = host_->fast_resize();
++    if (fast_resize) {
++      const NSSize frozen_size = [native_view_ frame].size;
++      fast_resize = frozen_size.width > 0 && frozen_size.height > 0;
++      if (fast_resize) {
++        bounds.set_size(gfx::Size(frozen_size.width, frozen_size.height));
++        bounds.Offset(w - bounds.width(), h - bounds.height());
++      }
++    }
++    ui::Layer* layer = GetUiLayer();
++    layer->SetClipRect(fast_resize ? gfx::Rect(w, h) : gfx::Rect());
++    const gfx::Point hosted_layer_origin(bounds.x() - x, bounds.y() - y);
++    for (ui::Layer* child : layer->children()) {
++      child->SetBounds(
++          gfx::Rect(hosted_layer_origin, child->bounds().size()));
++    }
++    native_view_hostable_->ViewsHostableSetBounds(bounds, superview_height);
+     native_view_hostable_->ViewsHostableSetVisible(true);
+   } else {
+     // Coordinates will be from the top left of the parent Widget. The
