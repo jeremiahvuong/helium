@@ -1,0 +1,56 @@
+--- a/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
++++ b/chrome/browser/ui/views/frame/layout/browser_view_tabbed_layout_impl.cc
+@@ -863,6 +863,7 @@
+   // be targeted for the content area when animating. It allows other elements
+   // to "fly over" the contents.
+   bool clip_content_for_animation = false;
++  bool zen_side_attach_animating = false;
+   gfx::Rect unclipped_contents_region = params.visual_client_area;
+ 
+   // Lay out vertical tab strip if visible.
+@@ -944,17 +945,28 @@
+       }
+ 
+       // Let the vertical tab strip animate out over the content.
+-      if (vertical_tab_strip_animation.current_motion) {
++      zen_side_attach_animating = zen.floating_vertical_tab_strip &&
++                                  zen.side_chrome_attach_ratio > 0.0f &&
++                                  zen.side_chrome_attach_ratio < 1.0f;
++      if (vertical_tab_strip_animation.current_motion ||
++          zen_side_attach_animating) {
+         const bool vertical_tab_strip_resize_animation =
+             vertical_tab_strip_animation.current_motion ==
+                 TabStripAnimations::kExpand ||
+             vertical_tab_strip_animation.current_motion ==
+                 TabStripAnimations::kCollapse;
+-        clip_content_for_animation =
+-            clip_content_for_animation || vertical_tab_strip_resize_animation;
+-        InsetHorizontal(unclipped_contents_region,
+-                        VerticalTabStripRegionView::kCollapsedWidth,
+-                        !vertical_right_aligned);
++        clip_content_for_animation = clip_content_for_animation ||
++                                     vertical_tab_strip_resize_animation ||
++                                     zen_side_attach_animating;
++        // The pin/unpin transition reaches the full client width when the
++        // sidebar is fully detached, so the unclipped region keeps the whole
++        // width; the collapse/expand animations bottom out at the collapsed
++        // strip width.
++        if (!zen_side_attach_animating) {
++          InsetHorizontal(unclipped_contents_region,
++                          VerticalTabStripRegionView::kCollapsedWidth,
++                          !vertical_right_aligned);
++        }
+       } else {
+         InsetHorizontal(unclipped_contents_region,
+                         horizontal_layout.vertical_tab_strip_width,
+@@ -1337,7 +1349,9 @@
+   // bounds. This is to make optimizations during animations e.g. avoid
+   // repositioning status bubble.
+   views().multi_contents_view->SetIsAnimatingContent(
+-      side_panel_is_animating || vertical_tab_strip_animation.current_motion);
++      side_panel_is_animating ||
++      static_cast<bool>(vertical_tab_strip_animation.current_motion) ||
++      zen_side_attach_animating);
+ 
+   // Lay out contents container. The contents container contains the multi-
+   // contents view when multi-contents are enabled. The checks here are to
